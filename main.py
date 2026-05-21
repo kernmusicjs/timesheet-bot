@@ -206,12 +206,19 @@ async def on_message(message: discord.Message):
             # Manual correction: "Amazon, 42.50, 15/05"
             state.awaiting_invoice_confirm = False
             try:
-                from services.invoice_parser import parse_manual_correction
+                from services.invoice_parser import parse_manual_correction, save_correction
                 from services.excel_updater import update_observation
                 corrected = parse_manual_correction(message.content)
+                raw_text = (state.pending_invoice or {}).get("raw_text", "")
                 state.pending_invoice = None
                 if corrected.get("vendor") and corrected.get("total") and corrected.get("date"):
                     result = update_observation(EXCEL_TIMESHEET_BASE_PATH, corrected["vendor"], corrected["total"], corrected["date"])
+                    if raw_text:
+                        try:
+                            save_correction(raw_text, corrected["vendor"], corrected["total"], corrected["date"])
+                            result += " 📚"
+                        except Exception as e:
+                            print(f"[invoice] save_correction failed: {e}", flush=True)
                 else:
                     result = "❌ Format invalide. Utilise: `Vendeur, total, DD/MM`"
             except Exception as e:
@@ -271,7 +278,12 @@ async def on_message(message: discord.Message):
             total = inv.get("total") or "?"
             inv_date = inv.get("date")
             date_str = inv_date.strftime("%d/%m/%Y") if inv_date else "?"
-            src_tag = " 🤖" if inv.get("source") == "gemini" else ""
+            warnings = []
+            if inv.get("vendor_confidence") != "signature":
+                warnings.append("⚠️ vérifie le vendeur")
+            if inv.get("date_confidence") != "order":
+                warnings.append("⚠️ vérifie la date")
+            warn_line = ("\n" + " · ".join(warnings)) if warnings else ""
 
             # Ask for confirmation
             state.awaiting_invoice_confirm = True
@@ -279,13 +291,14 @@ async def on_message(message: discord.Message):
                 "vendor": inv.get("vendor"),
                 "total": inv.get("total"),
                 "date": inv_date,
+                "raw_text": text,
             }
 
             await message.reply(
-                f"📄 **Facture détectée :**{src_tag}\n"
+                f"📄 **Facture détectée :**\n"
                 f"Vendeur : **{vendor}**\n"
                 f"Total TTC : **{total}€**\n"
-                f"Date : **{date_str}**\n\n"
+                f"Date : **{date_str}**{warn_line}\n\n"
                 f"Réponds `oui` pour confirmer, `non` pour annuler, "
                 f"ou corrige avec : `Vendeur, total, DD/MM`"
             )

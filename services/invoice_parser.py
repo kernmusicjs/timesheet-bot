@@ -1,6 +1,6 @@
 """
 Extract vendor, total TTC, and date from invoice files (PDF or image).
-Hybrid approach: regex first (free), Claude Haiku fallback when low confidence.
+100% regex-based with vendor signature database + correction-based learning.
 """
 
 import re
@@ -10,13 +10,40 @@ import json
 from datetime import date, datetime
 
 
-# Words that indicate the "vendor" line is actually a header/section title, not a brand
+# Section-header tokens that disqualify a "vendor" candidate
 BAD_VENDOR_TOKENS = [
     "détail", "detail", "facture", "invoice", "commande", "order",
     "récapitulatif", "recapitulatif", "récap", "recap", "client",
     "livraison", "adresse", "page", "ticket", "reçu", "recu",
     "numéro", "numero", "référence", "reference", "bon de",
 ]
+
+# Built-in vendor signatures: brand name → list of tokens to search (case-insensitive)
+VENDOR_SIGNATURES = {
+    "Amazon": ["amazon.fr", "amazon.com", "amazon eu", "amzn", "amazon europe"],
+    "Leclerc": ["leclerc", "e.leclerc", "scamark"],
+    "Fnac": ["fnac.com", "fnac darty", "fnac.fr"],
+    "Carrefour": ["carrefour.fr", "carrefour market", "carrefour hyper", "carrefour drive"],
+    "Auchan": ["auchan.fr", "auchan retail", "auchan hyper"],
+    "Cdiscount": ["cdiscount.com", "cdiscount.fr"],
+    "Decathlon": ["decathlon.fr", "decathlon.com"],
+    "Action": ["action.fr", "action france"],
+    "Boulanger": ["boulanger.com", "boulanger.fr"],
+    "Darty": ["darty.com", "darty.fr"],
+    "IKEA": ["ikea.fr", "ikea.com"],
+    "Castorama": ["castorama.fr"],
+    "Leroy Merlin": ["leroymerlin.fr", "leroy merlin"],
+    "Brico Dépôt": ["bricodepot.fr", "brico dépôt", "brico depot"],
+}
+
+FRENCH_MONTHS_LOOKUP = {
+    "janvier": 1, "janv": 1, "février": 2, "fevrier": 2, "févr": 2, "fevr": 2,
+    "mars": 3, "avril": 4, "avr": 4, "mai": 5, "juin": 6, "juillet": 7, "juil": 7,
+    "août": 8, "aout": 8, "septembre": 9, "sept": 9, "octobre": 10, "oct": 10,
+    "novembre": 11, "nov": 11, "décembre": 12, "decembre": 12, "déc": 12, "dec": 12,
+}
+
+CORRECTIONS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data", "corrections.json")
 
 
 def extract_text(content: bytes, filename: str) -> str:
@@ -39,8 +66,115 @@ def extract_text(content: bytes, filename: str) -> str:
             return f"[OCR error: {e}]"
 
 
-def _parse_regex(text: str) -> dict:
-    """Best-effort regex extraction. May return partial/wrong results."""
+def _load_corrections() -> list:
+    try:
+        with open(CORRECTIONS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
+def _all_signatures() -> dict:
+    """Merge built-in signatures with learned corrections."""
+    merged = {k: list(v) for k, v in VENDOR_SIGNATURES.items()}
+    for entry in _load_corrections():
+        vendor = entry.get("vendor")
+        sigs = entry.get("signatures", [])
+        if not vendor or not sigs:
+            continue
+        merged.setdefault(vendor, [])
+        for s in sigs:
+            if s and s.lower() not in [x.lower() for x in merged[vendor]]:
+                merged[vendor].append(s)
+    return merged
+
+
+def _detect_vendor_signature(text: str) -> str | None:
+    """Return brand name if a known signature is found in text."""
+    text_lower = text.lower()
+    for vendor, tokens in _all_signatures().items():
+        for tok in tokens:
+            if tok.lower() in text_lower:
+                return vendor
+    return None
+
+
+def _extract_signatures_from_text(text: str) -> list:
+    """Pull domain-like and URL-like tokens from text — candidates for learning."""
+    candidates = set()
+    for m in re.finditer(r'\b([a-zA-Z0-9][a-zA-Z0-9\-]{1,30}\.(?:fr|com|net|eu|de|be|ch))\b', text):
+        candidates.add(m.group(1).lower())
+    return list(candidates)[:5]
+
+
+def _parse_order_date(text: str) -> date | None:
+    """Look for explicit order/command date patterns. Returns date or None."""
+    # Pattern: "Commandé le 22 septembre 2025"
+    m = re.search(
+        r'command[ée]\s*le\s*(\d{1,2})\s+([a-zéûôàè]+)\s+(\d{4})',
+        text, re.IGNORECASE
+    )
+    if m:
+        day = int(m.group(1))
+        month_name = m.group(2).lower()
+        year = int(m.group(3))
+        month = FRENCH_MONTHS_LOOKUP.get(month_name)
+        if month:
+            try:
+                return date(year, month, day)
+            except ValueError:
+                pass
+
+    # Numeric order-date patterns
+    for pat in [
+        r'date\s*de\s*(?:la\s*)?commande\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'commande\s*effectuée\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'order\s*date\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'order\s*placed\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+    ]:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                pass
+
+    return None
+
+
+def _parse_fallback_date(text: str) -> date | None:
+    """Last-resort: any DD/MM/YYYY in the text."""
+    m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            pass
+    return None
+
+
+def _heuristic_vendor(text: str) -> str | None:
+    """Last-resort vendor: first non-empty line that doesn't look like a header."""
+    for line in text.split("\n"):
+        line = line.strip()
+        if len(line) < 3 or re.match(r'^\d', line) or re.match(r'^[^\w]', line):
+            continue
+        if any(tok in line.lower() for tok in BAD_VENDOR_TOKENS):
+            continue
+        if re.search(r'\d{2}[/\-]\d{2}', line) or re.search(r'\d{4}', line):
+            continue
+        return line[:40]
+    return None
+
+
+def parse_invoice(text: str) -> dict:
+    """
+    Extract vendor/total/date with regex + vendor signatures.
+    Returns dict: vendor, total (str|None), date (date|None),
+                  vendor_confidence ('signature'|'heuristic'|None),
+                  date_confidence ('order'|'fallback'|None).
+    """
+    # --- Total TTC ---
     total = None
     for pat in [
         r'total\s*ttc\s*[:\-]?\s*(\d+[.,]\d{2})',
@@ -53,117 +187,54 @@ def _parse_regex(text: str) -> dict:
             total = m.group(1).replace(",", ".")
             break
 
-    invoice_date = None
-    # Order date priority
-    for pat in [
-        r'command[ée]\s*le\s*[:\-]?\s*(\d{1,2})[/\-\s]+(\d{1,2}|janv|févr|fevr|mars|avril|mai|juin|juil|août|aout|sept|oct|nov|déc|dec)[/\-\s]+(\d{4})',
-        r'date\s*de\s*commande\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
-        r'commande\s*effectuée\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
-        r'order\s*date\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
-    ]:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            try:
-                invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-                break
-            except (ValueError, IndexError):
-                pass
+    # --- Vendor ---
+    vendor = _detect_vendor_signature(text)
+    vendor_confidence = "signature" if vendor else None
+    if not vendor:
+        vendor = _heuristic_vendor(text)
+        vendor_confidence = "heuristic" if vendor else None
 
+    # --- Date ---
+    invoice_date = _parse_order_date(text)
+    date_confidence = "order" if invoice_date else None
     if not invoice_date:
-        m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text)
-        if m:
-            try:
-                invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-            except ValueError:
-                pass
+        invoice_date = _parse_fallback_date(text)
+        date_confidence = "fallback" if invoice_date else None
 
-    vendor = None
-    for line in text.split("\n"):
+    return {
+        "vendor": vendor,
+        "total": total,
+        "date": invoice_date,
+        "vendor_confidence": vendor_confidence,
+        "date_confidence": date_confidence,
+    }
+
+
+def save_correction(raw_text: str, vendor: str, total: str, invoice_date) -> None:
+    """Persist a manual correction with extracted signatures for future auto-detection."""
+    os.makedirs(os.path.dirname(CORRECTIONS_PATH), exist_ok=True)
+    corrections = _load_corrections()
+
+    signatures = _extract_signatures_from_text(raw_text)
+    raw_hint = ""
+    for line in raw_text.split("\n"):
         line = line.strip()
-        if len(line) > 2 and not re.match(r'^\d', line) and not re.match(r'^[^\w]', line):
-            vendor = line[:40]
+        if len(line) > 3 and not re.match(r'^\d', line):
+            raw_hint = line[:60]
             break
 
-    return {"vendor": vendor, "total": total, "date": invoice_date}
+    corrections.append({
+        "vendor": vendor,
+        "signatures": signatures,
+        "raw_hint": raw_hint,
+        "total": total,
+        "date": invoice_date.isoformat() if invoice_date else None,
+        "corrected_at": date.today().isoformat(),
+    })
+    corrections = corrections[-100:]
 
-
-def _confidence_low(result: dict, text: str) -> bool:
-    """Return True if regex result looks unreliable."""
-    if not result.get("total") or not result.get("date") or not result.get("vendor"):
-        return True
-    v = (result["vendor"] or "").lower()
-    if any(tok in v for tok in BAD_VENDOR_TOKENS):
-        return True
-    # Vendor contains digits or dates → likely a header
-    if re.search(r'\d{2}[/\-]\d{2}', v) or re.search(r'\d{4}', v):
-        return True
-    if len(v.strip()) < 3:
-        return True
-    return False
-
-
-def _parse_with_ai(text: str) -> dict | None:
-    """Call Gemini Flash to extract structured invoice data. Returns None on failure."""
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        return None
-    try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
-        snippet = text[:4000]
-        prompt = (
-            "Extrait du texte brut d'une facture les informations suivantes et réponds UNIQUEMENT en JSON valide (pas de markdown, pas de texte autour) :\n"
-            "- vendor: le nom du commerçant/marque (Amazon, Leclerc, Fnac, etc.) — pas un titre de section\n"
-            "- total: le montant TOTAL TTC en euros, format '42.50' (point décimal, pas de symbole)\n"
-            "- date: la date de COMMANDE/ACHAT (pas la date d'édition/impression de la facture) au format YYYY-MM-DD\n\n"
-            "Si une info est introuvable, mets null. Texte de la facture :\n\n"
-            f"{snippet}\n\n"
-            'Réponds uniquement avec : {"vendor": "...", "total": "...", "date": "YYYY-MM-DD"}'
-        )
-        resp = model.generate_content(prompt)
-        raw = resp.text.strip()
-        # Strip possible code fences
-        raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', raw, flags=re.MULTILINE).strip()
-        data = json.loads(raw)
-        parsed_date = None
-        if data.get("date"):
-            try:
-                parsed_date = datetime.strptime(data["date"], "%Y-%m-%d").date()
-            except ValueError:
-                pass
-        return {
-            "vendor": data.get("vendor"),
-            "total": str(data["total"]) if data.get("total") is not None else None,
-            "date": parsed_date,
-        }
-    except Exception as e:
-        print(f"[invoice_parser] Gemini fallback failed: {e}", flush=True)
-        return None
-
-
-def parse_invoice(text: str) -> dict:
-    """
-    Hybrid extraction: regex first, Claude Haiku fallback if confidence is low.
-    Returns dict with keys: vendor, total (str), date (date|None), source ('regex'|'haiku').
-    """
-    regex_result = _parse_regex(text)
-    if not _confidence_low(regex_result, text):
-        regex_result["source"] = "regex"
-        return regex_result
-
-    ai_result = _parse_with_ai(text)
-    if ai_result:
-        merged = {
-            "vendor": ai_result.get("vendor") or regex_result.get("vendor"),
-            "total": ai_result.get("total") or regex_result.get("total"),
-            "date": ai_result.get("date") or regex_result.get("date"),
-            "source": "gemini",
-        }
-        return merged
-
-    regex_result["source"] = "regex"
-    return regex_result
+    with open(CORRECTIONS_PATH, "w", encoding="utf-8") as f:
+        json.dump(corrections, f, ensure_ascii=False, indent=2)
 
 
 def parse_manual_correction(text: str) -> dict:
