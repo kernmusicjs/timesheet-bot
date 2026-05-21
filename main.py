@@ -24,15 +24,20 @@ FRENCH_MONTHS_CAP = {k: v.capitalize() for k, v in FRENCH_MONTHS.items()}
 def _safe_name(s: str) -> str:
     """Sanitize a string for use in a filename."""
     import re as _re
-    return _re.sub(r'[^\w\-\.€ ]', '_', s).strip() or "X"
+    return _re.sub(r'[^\w\-\.€ ,]', '_', s).strip() or "X"
+
+
+def invoice_filename(vendor: str, total: str, invoice_date) -> str:
+    """Generate consistent invoice filename: 'Amazon 7,98€ 20-05.pdf'."""
+    total_fr = (total or "?").replace(".", ",")
+    return f"{_safe_name(vendor)} {_safe_name(total_fr)}€ {invoice_date.strftime('%d-%m')}.pdf"
 
 
 def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
     """Upload PDF to Dropbox in 'Factures {Month} {Year}/' folder next to the Excel."""
     month_name = FRENCH_MONTHS_CAP[invoice_date.month]
     folder = f"{DROPBOX_VAULT_PATH}/Factures {month_name} {invoice_date.year}"
-    ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "pdf"
-    fname = f"{_safe_name(vendor)}_{_safe_name(total)}€_{invoice_date.strftime('%d-%m')}.{ext}"
+    fname = invoice_filename(vendor, total, invoice_date)
     dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
     dbx.create_folder(folder)
     dbx.upload_bytes(content, f"{folder}/{fname}")
