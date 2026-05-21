@@ -1,0 +1,121 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                        TIMESHEET BOT — QUICKSTART                          ║
+║             Cloud automation for monthly timesheet + invoice sync           ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+WHAT IS THIS?
+─────────────
+A Discord bot that automatically:
+- Syncs timesheet entries from iPhone to cloud
+- Extracts invoices from Outlook
+- Generates monthly Excel reports
+- Runs on Railway cloud (24/7)
+
+QUICKSTART (30 MIN)
+───────────────────
+
+1. Setup environment:
+   $ cd ~/timesheet-bot
+   $ ./setup.sh
+   $ source venv/bin/activate
+
+2. Get Microsoft token (one-time):
+   $ python auth/ms_auth.py
+   [Follow instructions, copy token to .env]
+
+3. Fill credentials in .env:
+   - AZURE_CLIENT_ID
+   - MICROSOFT_REFRESH_TOKEN
+   - DROPBOX_APP_KEY, etc.
+   - DISCORD_BOT_TOKEN, etc.
+   [See SETUP.md for detailed instructions]
+
+4. Start bot locally:
+   $ python main.py
+   [Bot should appear online on Discord]
+
+5. Test on Discord:
+   /status
+   /rapport
+   /sync
+
+DEPLOYMENT
+──────────
+
+When ready to go live:
+
+   $ npm install -g @railway/cli
+   $ railway init
+   $ railway deploy
+
+Bot will run 24/7 on Railway. Monthly reports auto-generate on 1st of month.
+
+FILES
+─────
+
+README.md          — Architecture + usage
+SETUP.md           — Detailed setup instructions
+NEXT_STEPS.md      — Phase-by-phase timeline
+requirements.txt   — Python dependencies
+.env.example       — Credentials template
+
+PROJECT STRUCTURE
+─────────────────
+
+timesheet-bot/
+├── main.py           # Discord bot entry point
+├── scheduler.py      # Monthly cron job
+├── config.py         # Environment variables
+├── services/         # Core functionality
+│   ├── graph_api.py         (Outlook)
+│   ├── dropbox_client.py    (Cloud storage)
+│   ├── timesheet_parser.py  (Parse Markdown)
+│   └── excel_builder.py     (Generate reports)
+└── commands/         # Discord commands
+    ├── sync.py       (/sync)
+    ├── rapport.py    (/rapport)
+    ├── factures.py   (/factures)
+    └── status.py     (/status)
+
+TIMELINE
+────────
+
+Local setup:         30 min
+Credentials:         20 min
+Testing:             30 min
+Railway deploy:      20 min
+─────────────────────────────
+TOTAL:              ~2 hours
+
+CREDENTIALS YOU'LL NEED
+──────────────────────
+
+□ Microsoft Azure account        → AZURE_CLIENT_ID
+□ Dropbox account                → DROPBOX_APP_KEY, DROPBOX_APP_SECRET
+□ Discord server + bot           → DISCORD_BOT_TOKEN
+□ GitHub account (optional)      → For Railway integration
+□ Railway account (free)         → To deploy
+
+See SETUP.md for detailed instructions on obtaining each.
+
+DISCORD COMMANDS
+────────────────
+
+/sync              Synchronize timesheet to cloud
+/rapport           Generate monthly Excel report
+/factures          List Outlook invoices
+/status            Show system health
+
+SUPPORT
+───────
+
+1. Read SETUP.md for step-by-step instructions
+2. Check README.md for technical details
+3. See NEXT_STEPS.md for phase timeline
+4. Run `python main.py` locally to test before deploying
+
+═══════════════════════════════════════════════════════════════════════════════
+
+Ready? Start with: ./setup.sh
+
+═══════════════════════════════════════════════════════════════════════════════
