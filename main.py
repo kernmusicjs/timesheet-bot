@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 from datetime import datetime
 import asyncio
 from config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH, EXCEL_TIMESHEET_BASE_PATH
-from commands import sync, rapport, factures, status, fh, resume, annuler, modifier
+from commands import fh, resume, annuler, modifier
 from scheduler import start_monthly_scheduler
 from services.dropbox_client import DropboxClient
 import state
@@ -34,23 +34,19 @@ def invoice_filename(vendor: str, total: str, invoice_date) -> str:
 
 
 def archive_folder_for(invoice_date) -> str:
-    """Return Dropbox path 'Feuille d'heures/{Year}/{Month}/'."""
+    """Return Dropbox path 'Feuille d'heures/{Year}/{Month} {Year}/'."""
     month_name = FRENCH_MONTHS_CAP[invoice_date.month]
-    return f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{invoice_date.year}/{month_name}"
+    return f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{invoice_date.year}/{month_name} {invoice_date.year}"
 
 
 def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
-    """Upload PDF to 'Feuille d'heures/{Year}/{Month}/' folder."""
+    """Upload PDF to 'Feuille d'heures/{Year}/{Month} {Year}/' folder."""
     folder = archive_folder_for(invoice_date)
     fname = invoice_filename(vendor, total, invoice_date)
     dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
-    # create year + month folders if missing
-    parts = folder[len(DROPBOX_VAULT_PATH):].strip("/").split("/")
-    acc = DROPBOX_VAULT_PATH
-    for p in parts:
-        acc = f"{acc}/{p}"
+    for f in [f"{DROPBOX_VAULT_PATH}/Feuille d'heures", f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{invoice_date.year}", folder]:
         try:
-            dbx.dbx.files_create_folder_v2(acc)
+            dbx.dbx.files_create_folder_v2(f)
         except Exception:
             pass
     dbx.upload_bytes(content, f"{folder}/{fname}")
@@ -102,8 +98,12 @@ async def scheduler_task():
     # Monthly report: 1st of month at 07:00
     if now.day == 1 and now.hour == 7 and now.minute == 0:
         await run_monthly_report()
-    # Daily timesheet prompt: 16:00, workdays only (Mon–Fri)
+    # Daily timesheet prompt: 16:00, workdays only (Mon–Fri), skip holidays
     if now.weekday() < 5 and now.hour == 16 and now.minute == 0:
+        from services.holidays import is_holiday
+        if is_holiday(now.date()):
+            print(f"[scheduler] skipping 16h prompt — holiday: {is_holiday(now.date())}", flush=True)
+            return
         channel = bot.get_channel(DISCORD_CHANNEL_ID)
         if channel:
             day_names = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"]
@@ -325,13 +325,15 @@ async def on_message(message: discord.Message):
         try:
             from services.excel_updater import parse_response, update_excel_entry
             from datetime import date
-            target = state.pending_date if state.pending_date is not None else date.today()
+            targets = state.pending_dates or ([state.pending_date] if state.pending_date else [date.today()])
             state.pending_date = None
-            print(f"[timesheet] target={target} base={EXCEL_TIMESHEET_BASE_PATH}", flush=True)
-            entry = parse_response(message.content, target)
-            print(f"[timesheet] entry={entry}", flush=True)
-            result = update_excel_entry(EXCEL_TIMESHEET_BASE_PATH, entry, target)
-            print(f"[timesheet] result={result}", flush=True)
+            state.pending_dates = None
+            results = []
+            for target in targets:
+                print(f"[timesheet] target={target} base={EXCEL_TIMESHEET_BASE_PATH}", flush=True)
+                entry = parse_response(message.content, target)
+                results.append(update_excel_entry(EXCEL_TIMESHEET_BASE_PATH, entry, target))
+            result = "\n".join(results)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -397,26 +399,6 @@ async def on_message(message: discord.Message):
 
 async def setup_commands():
     """Register all commands."""
-    # Load sync command
-    @bot.tree.command(name="sync", description="Sync timesheet entries from iCloud to Dropbox")
-    async def sync_cmd(interaction: discord.Interaction):
-        await sync.sync_command(interaction)
-
-    # Load rapport command
-    @bot.tree.command(name="rapport", description="Generate monthly Excel report")
-    async def rapport_cmd(interaction: discord.Interaction):
-        await rapport.rapport_command(interaction)
-
-    # Load factures command
-    @bot.tree.command(name="factures", description="Find invoices in Outlook")
-    async def factures_cmd(interaction: discord.Interaction):
-        await factures.factures_command(interaction)
-
-    # Load status command
-    @bot.tree.command(name="status", description="Show system status")
-    async def status_cmd(interaction: discord.Interaction):
-        await status.status_command(interaction)
-
     # Load fh command
     @bot.tree.command(name="fh", description="Remplir la feuille d'heures (aujourd'hui ou une date passée)")
     @discord.app_commands.describe(date="Date optionnelle au format DD/MM (ex: 19/05)")

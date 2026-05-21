@@ -308,6 +308,77 @@ def update_excel_entry(base_path: str, entry: dict, target_date: date = None) ->
     return f"✓ {day_label}{client_info} — {affaire} — {h_norm}h normales, {h_sup}h sup"
 
 
+def create_month_template(base_path: str, year: int, month: int) -> str:
+    """Create a new monthly timesheet Excel file with workdays pre-filled in column A
+    and French/Alsace-Moselle holidays pre-marked in column C."""
+    from calendar import monthrange
+    from services.holidays import french_holidays
+    target_date = date(year, month, 1)
+    excel_path = get_excel_path(base_path, target_date)
+    dropbox_sync = os.getenv("DROPBOX_SYNC", "").lower() in ("1", "true", "yes")
+    month_name = FRENCH_MONTHS[month]
+
+    # Skip if file already exists in Dropbox
+    if dropbox_sync:
+        try:
+            from services.dropbox_client import DropboxClient
+            from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+            dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+            dropbox_path = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {year}.xlsx"
+            os.makedirs(base_path, exist_ok=True)
+            try:
+                dbx.dbx.files_get_metadata(dropbox_path)
+                return f"ℹ️ {month_name} {year} existe déjà"
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    # Use openpyxl to create from scratch using same structure as existing template
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "FH"
+
+    # Header (rows 1-6) + table header (row 8)
+    _add_header(ws, month, year)
+    ws["A8"] = "DATES"
+    ws["B8"] = "CLIENTS"
+    ws["C8"] = "AFFAIRES  ou  DOSSIERS"
+    ws["D8"] = "H. Normales"
+    ws["E8"] = "H. Sup"
+    ws["F8"] = "Observations"
+
+    # Fill column A with workdays only (Mon–Fri)
+    holidays = french_holidays(year, alsace_moselle=True)
+    days_in_month = monthrange(year, month)[1]
+    row = 9
+    for d in range(1, days_in_month + 1):
+        the_date = date(year, month, d)
+        if the_date.weekday() >= 5:  # skip weekends
+            continue
+        ws[f"A{row}"] = datetime(year, month, d)
+        if the_date in holidays:
+            ws[f"C{row}"] = f"Férié - {holidays[the_date]}"
+            ws[f"D{row}"] = 0
+        row += 1
+
+    _autofit_columns(ws)
+    wb.save(excel_path)
+
+    if dropbox_sync:
+        try:
+            from services.dropbox_client import DropboxClient
+            from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+            dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+            dropbox_path = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {year}.xlsx"
+            dbx.upload_binary_file(excel_path, dropbox_path)
+        except Exception as e:
+            return f"❌ Upload échoué: {e}"
+
+    return f"✓ Créé : Feuille d'heures {month_name} {year}.xlsx ({row - 9} jours ouvrés)"
+
+
 def clear_row(base_path: str, target_date: date) -> str:
     """Clear B/C/D/E/F for a given date row. Used by /annuler."""
     excel_path = get_excel_path(base_path, target_date)
@@ -375,7 +446,7 @@ def summarize_month(base_path: str, target_date: date = None) -> str:
             # Count invoices in archive folder
             inv_count = 0
             try:
-                r = dbx.dbx.files_list_folder(f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{target_date.year}/{month_name}")
+                r = dbx.dbx.files_list_folder(f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{target_date.year}/{month_name} {target_date.year}")
                 inv_count = sum(1 for e in r.entries if e.name.lower().endswith(".pdf"))
             except Exception:
                 pass

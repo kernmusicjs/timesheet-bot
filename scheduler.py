@@ -116,7 +116,7 @@ async def archive_previous_month_excel(bot):
         month_name = months_cap[month]
 
         src = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {year}.xlsx"
-        archive_folder = f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{year}/{month_name}"
+        archive_folder = f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{year}/{month_name} {year}"
         dst = f"{archive_folder}/Feuille d'heures.xlsx"
 
         dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
@@ -138,10 +138,26 @@ async def archive_previous_month_excel(bot):
 
         channel = bot.get_channel(DISCORD_CHANNEL_ID)
         if channel:
-            await channel.send(f"📦 Mois clôturé : `Feuille d'heures/{year}/{month_name}/` contient maintenant `Feuille d'heures.xlsx` + les factures. Prêt à envoyer à l'employeur.")
+            await channel.send(f"📦 Mois clôturé : `Feuille d'heures/{year}/{month_name} {year}/` contient maintenant `Feuille d'heures.xlsx` + les factures. Prêt à envoyer à l'employeur.")
         print(f"✓ Archived {month_name} {year}", flush=True)
     except Exception as e:
         print(f"✗ archive_previous_month_excel: {e}", flush=True)
+        import traceback; traceback.print_exc()
+
+
+async def create_current_month_template(bot):
+    """On the 1st: create the new month's Excel template with pre-filled workdays and holidays."""
+    try:
+        from services.excel_updater import create_month_template
+        from config import EXCEL_TIMESHEET_BASE_PATH, DISCORD_CHANNEL_ID
+        now = datetime.now()
+        result = create_month_template(EXCEL_TIMESHEET_BASE_PATH, now.year, now.month)
+        channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        if channel:
+            await channel.send(f"📅 Nouveau mois : {result}")
+        print(f"[scheduler] {result}", flush=True)
+    except Exception as e:
+        print(f"✗ create_current_month_template: {e}", flush=True)
         import traceback; traceback.print_exc()
 
 
@@ -170,6 +186,16 @@ def start_monthly_scheduler(bot):
         args=[bot],
         id="archive_month_excel",
         name="Archive previous month Excel",
+        replace_existing=True
+    )
+
+    # Create new month's timesheet template: 1st of each month at 07:10
+    scheduler.add_job(
+        create_current_month_template,
+        CronTrigger(day=1, hour=7, minute=10),
+        args=[bot],
+        id="create_month_template",
+        name="Create current month template",
         replace_existing=True
     )
 

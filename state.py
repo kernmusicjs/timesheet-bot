@@ -2,6 +2,7 @@
 
 awaiting_timesheet = False
 pending_date = None
+pending_dates = None  # list[date] for multi-day /fh ranges
 
 # Invoice confirmation state
 awaiting_invoice_confirm = False
