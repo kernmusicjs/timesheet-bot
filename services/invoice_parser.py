@@ -48,16 +48,57 @@ def parse_invoice(text: str) -> dict:
             total = m.group(1).replace(",", ".")
             break
 
-    # --- Date ---
+    # --- Date: prioritize order/command date over invoice date ---
     invoice_date = None
-    # DD/MM/YYYY or DD-MM-YYYY
-    m = re.search(r'\b(\d{2})[/\-](\d{2})[/\-](\d{4})\b', text)
-    if m:
-        try:
-            invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
-        except ValueError:
-            pass
-    # YYYY-MM-DD
+
+    # 1. Look for "Date de commande" / "Commande effectuée" / "Order date"
+    patterns_order_date = [
+        r'date\s*de\s*commande\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'commande\s*effectuée\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'order\s*date\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        r'date\s*de\s*commande\s*[:\-]?\s*(\d{4})[/\-](\d{2})[/\-](\d{2})',
+    ]
+    for pat in patterns_order_date:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            try:
+                if len(m.group(3)) == 4:  # YYYY or DD at position 3
+                    if m.group(3) > "2000":  # likely YYYY
+                        invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                    else:  # likely DD (from YYYY-MM-DD pattern)
+                        invoice_date = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                else:
+                    invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                break
+            except (ValueError, IndexError):
+                pass
+
+    # 2. If no order date found, look for "Date de facture" / "Invoice date"
+    if not invoice_date:
+        patterns_invoice_date = [
+            r'date\s*de\s*facture\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+            r'invoice\s*date\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+            r'date\s*[:\-]?\s*(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})',
+        ]
+        for pat in patterns_invoice_date:
+            m = re.search(pat, text, re.IGNORECASE)
+            if m:
+                try:
+                    invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+                    break
+                except ValueError:
+                    pass
+
+    # 3. Fallback: DD/MM/YYYY anywhere
+    if not invoice_date:
+        m = re.search(r'\b(\d{2})[/\-](\d{2})[/\-](\d{4})\b', text)
+        if m:
+            try:
+                invoice_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                pass
+
+    # 4. Fallback: YYYY-MM-DD anywhere
     if not invoice_date:
         m = re.search(r'\b(\d{4})[/\-](\d{2})[/\-](\d{2})\b', text)
         if m:
