@@ -8,7 +8,7 @@ from discord.ext import commands, tasks
 from datetime import datetime
 import asyncio
 from config import DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH, EXCEL_TIMESHEET_BASE_PATH
-from commands import sync, rapport, factures, status, fh
+from commands import sync, rapport, factures, status, fh, resume, annuler, modifier
 from scheduler import start_monthly_scheduler
 from services.dropbox_client import DropboxClient
 import state
@@ -33,13 +33,26 @@ def invoice_filename(vendor: str, total: str, invoice_date) -> str:
     return f"{_safe_name(vendor)} {_safe_name(total_fr)}€ {invoice_date.strftime('%d-%m')}.pdf"
 
 
-def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
-    """Upload PDF to Dropbox in 'Factures {Month} {Year}/' folder next to the Excel."""
+def archive_folder_for(invoice_date) -> str:
+    """Return Dropbox path 'Feuille d'heures/{Year}/{Month}/'."""
     month_name = FRENCH_MONTHS_CAP[invoice_date.month]
-    folder = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {invoice_date.year}"
+    return f"{DROPBOX_VAULT_PATH}/Feuille d'heures/{invoice_date.year}/{month_name}"
+
+
+def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
+    """Upload PDF to 'Feuille d'heures/{Year}/{Month}/' folder."""
+    folder = archive_folder_for(invoice_date)
     fname = invoice_filename(vendor, total, invoice_date)
     dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
-    dbx.create_folder(folder)
+    # create year + month folders if missing
+    parts = folder[len(DROPBOX_VAULT_PATH):].strip("/").split("/")
+    acc = DROPBOX_VAULT_PATH
+    for p in parts:
+        acc = f"{acc}/{p}"
+        try:
+            dbx.dbx.files_create_folder_v2(acc)
+        except Exception:
+            pass
     dbx.upload_bytes(content, f"{folder}/{fname}")
 
 # Initialize bot
@@ -102,6 +115,48 @@ async def scheduler_task():
             )
             state.awaiting_timesheet = True
             state.pending_date = None
+
+    # 18:00 relance — if still awaiting today's entry
+    if now.weekday() < 5 and now.hour == 18 and now.minute == 0 and state.awaiting_timesheet:
+        channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        if channel:
+            await channel.send("🔔 Petit rappel : ta feuille d'heures n'est pas encore remplie aujourd'hui.")
+
+    # Next morning 08:00 — if previous workday missing, ask retroactively
+    if now.weekday() < 5 and now.hour == 8 and now.minute == 0:
+        from datetime import timedelta
+        prev = now.date() - timedelta(days=1)
+        # If today is Monday, check Friday
+        while prev.weekday() >= 5:
+            prev -= timedelta(days=1)
+        try:
+            from services.excel_updater import get_excel_path
+            from openpyxl import load_workbook
+            from services.dropbox_client import DropboxClient
+            from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+            import tempfile, os as _os
+            month_name = FRENCH_MONTHS[prev.month].capitalize()
+            dpath = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {prev.year}.xlsx"
+            local = _os.path.join(tempfile.gettempdir(), f"check_{prev.isoformat()}.xlsx")
+            dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+            if dbx.download_binary(dpath, local):
+                wb = load_workbook(local)
+                ws = wb["FH"]
+                missing = True
+                for row in ws.iter_rows(min_row=9, max_row=41):
+                    if isinstance(row[0].value, datetime) and row[0].value.date() == prev:
+                        if row[1].value or row[2].value:
+                            missing = False
+                        break
+                if missing:
+                    channel = bot.get_channel(DISCORD_CHANNEL_ID)
+                    if channel:
+                        day_names = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"]
+                        await channel.send(
+                            f"⏪ Hier ({day_names[prev.weekday()]} {prev.strftime('%d/%m')}) n'est pas rempli. Tape `/fh {prev.strftime('%d/%m')}` pour le saisir."
+                        )
+        except Exception as e:
+            print(f"[relance morning] {e}", flush=True)
 
 
 @scheduler_task.before_loop
@@ -367,6 +422,20 @@ async def setup_commands():
     @discord.app_commands.describe(date="Date optionnelle au format DD/MM (ex: 19/05)")
     async def fh_cmd(interaction: discord.Interaction, date: str = None):
         await fh.fh_command(interaction, date)
+
+    @bot.tree.command(name="resume", description="Résumé du mois en cours : jours saisis, manquants, totaux, factures")
+    async def resume_cmd(interaction: discord.Interaction):
+        await resume.resume_command(interaction)
+
+    @bot.tree.command(name="annuler", description="Effacer une ligne de la feuille d'heures")
+    @discord.app_commands.describe(date="Date au format DD/MM, 'hier', ou vide pour aujourd'hui")
+    async def annuler_cmd(interaction: discord.Interaction, date: str = None):
+        await annuler.annuler_command(interaction, date)
+
+    @bot.tree.command(name="modifier", description="Re-saisir une ligne de la feuille d'heures (écrase l'ancien)")
+    @discord.app_commands.describe(date="Date au format DD/MM, 'hier', ou vide pour aujourd'hui")
+    async def modifier_cmd(interaction: discord.Interaction, date: str = None):
+        await modifier.modifier_command(interaction, date)
 
 
 async def main():

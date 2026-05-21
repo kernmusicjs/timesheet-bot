@@ -66,7 +66,40 @@ def extract_text(content: bytes, filename: str) -> str:
             return f"[OCR error: {e}]"
 
 
+CORRECTIONS_DROPBOX_PATH_SUFFIX = "/.bot-state/corrections.json"
+
+
+def _dropbox_pull_corrections():
+    """If local missing, try to restore from Dropbox."""
+    if os.path.exists(CORRECTIONS_PATH):
+        return
+    try:
+        from services.dropbox_client import DropboxClient
+        from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+        dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+        os.makedirs(os.path.dirname(CORRECTIONS_PATH), exist_ok=True)
+        dbx.download_binary(f"{DROPBOX_VAULT_PATH}{CORRECTIONS_DROPBOX_PATH_SUFFIX}", CORRECTIONS_PATH)
+    except Exception:
+        pass
+
+
+def _dropbox_push_corrections():
+    """Upload local corrections.json to Dropbox for backup."""
+    try:
+        from services.dropbox_client import DropboxClient
+        from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+        dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+        try:
+            dbx.dbx.files_create_folder_v2(f"{DROPBOX_VAULT_PATH}/.bot-state")
+        except Exception:
+            pass
+        dbx.upload_binary_file(CORRECTIONS_PATH, f"{DROPBOX_VAULT_PATH}{CORRECTIONS_DROPBOX_PATH_SUFFIX}")
+    except Exception as e:
+        print(f"[invoice_parser] corrections backup failed: {e}", flush=True)
+
+
 def _load_corrections() -> list:
+    _dropbox_pull_corrections()
     try:
         with open(CORRECTIONS_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
@@ -263,6 +296,7 @@ def save_correction(raw_text: str, vendor: str, total: str, invoice_date) -> Non
 
     with open(CORRECTIONS_PATH, "w", encoding="utf-8") as f:
         json.dump(corrections, f, ensure_ascii=False, indent=2)
+    _dropbox_push_corrections()
 
 
 def parse_manual_correction(text: str) -> dict:
