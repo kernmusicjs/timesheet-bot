@@ -271,6 +271,7 @@ async def on_message(message: discord.Message):
             total = inv.get("total") or "?"
             inv_date = inv.get("date")
             date_str = inv_date.strftime("%d/%m/%Y") if inv_date else "?"
+            src_tag = " 🤖" if inv.get("source") == "gemini" else ""
 
             # Ask for confirmation
             state.awaiting_invoice_confirm = True
@@ -281,7 +282,7 @@ async def on_message(message: discord.Message):
             }
 
             await message.reply(
-                f"📄 **Facture détectée :**\n"
+                f"📄 **Facture détectée :**{src_tag}\n"
                 f"Vendeur : **{vendor}**\n"
                 f"Total TTC : **{total}€**\n"
                 f"Date : **{date_str}**\n\n"
