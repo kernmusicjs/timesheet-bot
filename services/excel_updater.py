@@ -491,6 +491,56 @@ def summarize_month(base_path: str, target_date: date = None) -> str:
     )
 
 
+def update_hsup(base_path: str, target_date: date, h_sup: float) -> str:
+    """Write h_sup into column E for target_date row only. Used for yesterday follow-up."""
+    excel_path = get_excel_path(base_path, target_date)
+    dropbox_sync = os.getenv("DROPBOX_SYNC", "").lower() in ("1", "true", "yes")
+    month_name = FRENCH_MONTHS[target_date.month]
+
+    if dropbox_sync:
+        try:
+            from services.dropbox_client import DropboxClient
+            from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+            dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+            dropbox_path = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {target_date.year}.xlsx"
+            os.makedirs(base_path, exist_ok=True)
+            if not dbx.download_binary(dropbox_path, excel_path):
+                return f"❌ Fichier non trouvé: {os.path.basename(excel_path)}"
+        except Exception as e:
+            return f"❌ Erreur Dropbox: {e}"
+    elif not os.path.exists(excel_path):
+        return f"❌ Fichier non trouvé: {os.path.basename(excel_path)}"
+
+    wb = load_workbook(excel_path)
+    if "FH" not in wb.sheetnames:
+        return f"❌ Feuille 'FH' introuvable"
+    ws = wb["FH"]
+
+    target_row = None
+    for row in ws.iter_rows(min_row=9, max_row=41):
+        if isinstance(row[0].value, datetime) and row[0].value.date() == target_date:
+            target_row = row[0].row
+            break
+    if target_row is None:
+        return f"❌ Date {target_date.strftime('%d/%m')} non trouvée"
+
+    ws[f"E{target_row}"] = h_sup
+    _autofit_columns(ws)
+    wb.save(excel_path)
+
+    if dropbox_sync:
+        try:
+            from services.dropbox_client import DropboxClient
+            from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+            dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+            dropbox_path = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {target_date.year}.xlsx"
+            dbx.upload_binary_file(excel_path, dropbox_path)
+        except Exception as e:
+            print(f"[excel_updater] re-upload failed: {e}", flush=True)
+
+    return f"✓ {target_date.strftime('%d/%m')} — {h_sup}h sup enregistrées"
+
+
 def update_observation(base_path: str, vendor: str, total: str, target_date: date) -> str:
     """Append 'Vendor : total€' in column F (Observations) of the target date row."""
     excel_path = get_excel_path(base_path, target_date)

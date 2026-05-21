@@ -110,11 +110,14 @@ async def scheduler_task():
             day_label = f"{day_names[now.weekday()]} {now.day:02d}/{now.month:02d}"
             await channel.send(
                 f"⏰ **Feuille d'heures — {day_label}** — Que as-tu fait aujourd'hui?\n"
-                "Format: `Client, Affaire` ou `Client, Affaire, H.Sup` ou `Congé` / `Maladie` / `RTT`\n"
+                "Format: `Client, Affaire` ou `Congé` / `Maladie` / `RTT`\n"
                 "_(virgule, slash ou pipe acceptés — H. Normales auto: 8h lun–jeu, 7h ven)_"
             )
             state.awaiting_timesheet = True
+            state.auto_prompt = True
             state.pending_date = None
+            state.awaiting_hsup_yesterday = False
+            state.hsup_yesterday_date = None
 
     # 18:00 relance — if still awaiting today's entry
     if now.weekday() < 5 and now.hour == 18 and now.minute == 0 and state.awaiting_timesheet:
@@ -243,6 +246,14 @@ async def run_monthly_report():
         print(f"Error running monthly report: {e}")
 
 
+def _cancel_hsup_state():
+    """Reset H.Sup follow-up state after timeout (called via call_later)."""
+    if state.awaiting_hsup_yesterday:
+        state.awaiting_hsup_yesterday = False
+        state.hsup_yesterday_date = None
+        print("[hsup_timeout] question H.Sup expirée après 2h", flush=True)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     """Handle PDF uploads and daily timesheet responses."""
@@ -319,13 +330,32 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
+    # Handle H.Sup yesterday follow-up
+    if state.awaiting_hsup_yesterday and not message.attachments:
+        state.awaiting_hsup_yesterday = False
+        yesterday = state.hsup_yesterday_date
+        state.hsup_yesterday_date = None
+        content_lower = message.content.strip().lower()
+        if content_lower not in ("non", "n", "no", "0"):
+            try:
+                h_sup = float(message.content.strip().replace("h", "").replace("H", "").replace(",", "."))
+                from services.excel_updater import update_hsup
+                result = update_hsup(EXCEL_TIMESHEET_BASE_PATH, yesterday, h_sup)
+                await message.reply(result)
+            except ValueError:
+                await message.reply("❌ Format invalide. Envoie un nombre (ex: `1.5`) ou `non`.")
+        await bot.process_commands(message)
+        return
+
     # Handle daily timesheet response
     if state.awaiting_timesheet and not message.attachments:
         state.awaiting_timesheet = False
+        state.auto_prompt = False
         try:
             from services.excel_updater import parse_response, update_excel_entry
-            from datetime import date
+            from datetime import date, timedelta
             targets = state.pending_dates or ([state.pending_date] if state.pending_date else [date.today()])
+            was_for_today = date.today() in targets
             state.pending_date = None
             state.pending_dates = None
             results = []
@@ -338,7 +368,56 @@ async def on_message(message: discord.Message):
             import traceback
             traceback.print_exc()
             result = f"❌ Erreur: {e}"
+            was_for_today = False
         await message.reply(result)
+
+        # Ask about yesterday's H.Sup when entry is for today
+        if was_for_today:
+            from datetime import date, timedelta
+            from services.holidays import is_holiday
+            yesterday = date.today() - timedelta(days=1)
+            while yesterday.weekday() >= 5:
+                yesterday -= timedelta(days=1)
+            skip_reason = None
+            if is_holiday(yesterday):
+                skip_reason = "férié"
+            else:
+                try:
+                    from services.excel_updater import get_excel_path
+                    from openpyxl import load_workbook
+                    from datetime import datetime as _dt
+                    import os as _os
+                    excel_path = get_excel_path(EXCEL_TIMESHEET_BASE_PATH, yesterday)
+                    dropbox_sync = _os.getenv("DROPBOX_SYNC", "").lower() in ("1", "true", "yes")
+                    if dropbox_sync:
+                        from services.dropbox_client import DropboxClient
+                        from config import DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_VAULT_PATH
+                        from services.excel_updater import FRENCH_MONTHS
+                        dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+                        dropbox_path = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {FRENCH_MONTHS[yesterday.month]} {yesterday.year}.xlsx"
+                        _os.makedirs(EXCEL_TIMESHEET_BASE_PATH, exist_ok=True)
+                        dbx.download_binary(dropbox_path, excel_path)
+                    if _os.path.exists(excel_path):
+                        wb = load_workbook(excel_path)
+                        ws = wb["FH"]
+                        for row in ws.iter_rows(min_row=9, max_row=41):
+                            if isinstance(row[0].value, _dt) and row[0].value.date() == yesterday:
+                                if (row[3].value or 0) == 0:
+                                    skip_reason = "absence"
+                                break
+                except Exception as e:
+                    print(f"[hsup_check] {e}", flush=True)
+            if not skip_reason:
+                day_names = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi"]
+                day_label = f"{day_names[yesterday.weekday()]} {yesterday.strftime('%d/%m')}"
+                state.awaiting_hsup_yesterday = True
+                state.hsup_yesterday_date = yesterday
+                await message.channel.send(
+                    f"⏱️ As-tu fait des heures sup **hier** ({day_label}) ?\n"
+                    "Réponds avec le nombre (ex: `1.5`) ou `non`. _(expire dans 2h)_"
+                )
+                asyncio.get_event_loop().call_later(7200, _cancel_hsup_state)
+
         await bot.process_commands(message)
         return
 
