@@ -18,6 +18,25 @@ FRENCH_MONTHS = {
     7: "juillet", 8: "août", 9: "septembre", 10: "octobre", 11: "novembre", 12: "décembre"
 }
 
+FRENCH_MONTHS_CAP = {k: v.capitalize() for k, v in FRENCH_MONTHS.items()}
+
+
+def _safe_name(s: str) -> str:
+    """Sanitize a string for use in a filename."""
+    import re as _re
+    return _re.sub(r'[^\w\-\.€ ]', '_', s).strip() or "X"
+
+
+def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
+    """Upload PDF to Dropbox in 'Factures {Month} {Year}/' folder next to the Excel."""
+    month_name = FRENCH_MONTHS_CAP[invoice_date.month]
+    folder = f"{DROPBOX_VAULT_PATH}/Factures {month_name} {invoice_date.year}"
+    ext = original_filename.rsplit(".", 1)[-1].lower() if "." in original_filename else "pdf"
+    fname = f"{_safe_name(vendor)}_{_safe_name(total)}€_{invoice_date.strftime('%d-%m')}.{ext}"
+    dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
+    dbx.create_folder(folder)
+    dbx.upload_bytes(content, f"{folder}/{fname}")
+
 # Initialize bot
 intents = discord.Intents.default()
 intents.message_content = True
@@ -193,6 +212,12 @@ async def on_message(message: discord.Message):
                 try:
                     from services.excel_updater import update_observation
                     result = update_observation(EXCEL_TIMESHEET_BASE_PATH, inv["vendor"], inv["total"], inv["date"])
+                    if inv.get("pdf_bytes"):
+                        try:
+                            _upload_invoice_pdf(inv["pdf_bytes"], inv["pdf_filename"], inv["vendor"], inv["total"], inv["date"])
+                            result += " 📎"
+                        except Exception as e:
+                            print(f"[invoice] PDF upload failed: {e}", flush=True)
                 except Exception as e:
                     result = f"❌ Erreur: {e}"
                 await message.reply(result)
@@ -209,10 +234,17 @@ async def on_message(message: discord.Message):
                 from services.invoice_parser import parse_manual_correction, save_correction
                 from services.excel_updater import update_observation
                 corrected = parse_manual_correction(message.content)
-                raw_text = (state.pending_invoice or {}).get("raw_text", "")
+                pending = state.pending_invoice or {}
+                raw_text = pending.get("raw_text", "")
                 state.pending_invoice = None
                 if corrected.get("vendor") and corrected.get("total") and corrected.get("date"):
                     result = update_observation(EXCEL_TIMESHEET_BASE_PATH, corrected["vendor"], corrected["total"], corrected["date"])
+                    if pending.get("pdf_bytes"):
+                        try:
+                            _upload_invoice_pdf(pending["pdf_bytes"], pending["pdf_filename"], corrected["vendor"], corrected["total"], corrected["date"])
+                            result += " 📎"
+                        except Exception as e:
+                            print(f"[invoice] PDF upload failed: {e}", flush=True)
                     if raw_text:
                         try:
                             save_correction(raw_text, corrected["vendor"], corrected["total"], corrected["date"])
@@ -257,20 +289,11 @@ async def on_message(message: discord.Message):
 
     try:
         from services.invoice_parser import extract_text, parse_invoice
-        dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
-        now = datetime.now()
-        month_name = FRENCH_MONTHS[now.month]
-        folder = f"{DROPBOX_VAULT_PATH}/factures/{now.year}/{month_name}"
-        dbx.create_folder(folder)
 
         for attachment in invoice_attachments:
             content = await attachment.read()
 
-            # Save to Dropbox
-            dropbox_path = f"{folder}/{attachment.filename}"
-            dbx.upload_bytes(content, dropbox_path)
-
-            # Parse invoice
+            # Parse invoice (upload to Dropbox deferred until confirmation)
             text = extract_text(content, attachment.filename)
             inv = parse_invoice(text)
 
@@ -281,7 +304,7 @@ async def on_message(message: discord.Message):
             warnings = []
             if inv.get("vendor_confidence") != "signature":
                 warnings.append("⚠️ vérifie le vendeur")
-            if inv.get("date_confidence") != "order":
+            if inv.get("date_confidence") not in ("order", "oldest"):
                 warnings.append("⚠️ vérifie la date")
             warn_line = ("\n" + " · ".join(warnings)) if warnings else ""
 
@@ -292,6 +315,8 @@ async def on_message(message: discord.Message):
                 "total": inv.get("total"),
                 "date": inv_date,
                 "raw_text": text,
+                "pdf_bytes": content,
+                "pdf_filename": attachment.filename,
             }
 
             await message.reply(

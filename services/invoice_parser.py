@@ -142,15 +142,38 @@ def _parse_order_date(text: str) -> date | None:
     return None
 
 
-def _parse_fallback_date(text: str) -> date | None:
-    """Last-resort: any DD/MM/YYYY in the text."""
+def _all_dates_in_text(text: str) -> list:
+    """Find all dates in text (DD/MM/YYYY or 'DD MOIS YYYY'). Return sorted oldest-first."""
+    found = []
+    for m in re.finditer(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text):
+        try:
+            found.append(date(int(m.group(3)), int(m.group(2)), int(m.group(1))))
+        except ValueError:
+            pass
+    for m in re.finditer(r'\b(\d{1,2})\s+([a-zéûôàè]+)\s+(\d{4})\b', text, re.IGNORECASE):
+        month = FRENCH_MONTHS_LOOKUP.get(m.group(2).lower())
+        if month:
+            try:
+                found.append(date(int(m.group(3)), month, int(m.group(1))))
+            except ValueError:
+                pass
+    return sorted(set(found))
+
+
+def _parse_fallback_date(text: str, prefer_oldest: bool = False) -> date | None:
+    """Fallback: pick oldest date if vendor known (likely order date), else first."""
+    dates = _all_dates_in_text(text)
+    if not dates:
+        return None
+    if prefer_oldest:
+        return dates[0]
     m = re.search(r'\b(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})\b', text)
     if m:
         try:
             return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
         except ValueError:
             pass
-    return None
+    return dates[0]
 
 
 def _heuristic_vendor(text: str) -> str | None:
@@ -179,7 +202,10 @@ def parse_invoice(text: str) -> dict:
     for pat in [
         r'total\s*ttc\s*[:\-]?\s*(\d+[.,]\d{2})',
         r'montant\s*ttc\s*[:\-]?\s*(\d+[.,]\d{2})',
-        r'net\s*à\s*payer\s*[:\-]?\s*(\d+[.,]\d{2})',
+        r'total\s*[àa]\s*payer\s*[:\-]?\s*(\d+[.,]\d{2})',
+        r'net\s*[àa]\s*payer\s*[:\-]?\s*(\d+[.,]\d{2})',
+        r'facture\s*total\s*[:\-]?\s*(\d+[.,]\d{2})',
+        r'total\s*facture\s*[:\-]?\s*(\d+[.,]\d{2})',
         r'ttc\s*[:\-]?\s*(\d+[.,]\d{2})',
     ]:
         m = re.search(pat, text, re.IGNORECASE)
@@ -198,8 +224,10 @@ def parse_invoice(text: str) -> dict:
     invoice_date = _parse_order_date(text)
     date_confidence = "order" if invoice_date else None
     if not invoice_date:
-        invoice_date = _parse_fallback_date(text)
-        date_confidence = "fallback" if invoice_date else None
+        # When vendor is known via signature, prefer oldest date (order > edition)
+        prefer_oldest = vendor_confidence == "signature"
+        invoice_date = _parse_fallback_date(text, prefer_oldest=prefer_oldest)
+        date_confidence = "oldest" if prefer_oldest and invoice_date else ("fallback" if invoice_date else None)
 
     return {
         "vendor": vendor,
