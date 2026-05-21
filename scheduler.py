@@ -116,11 +116,11 @@ async def archive_previous_month_excel(bot):
         month_name = months_cap[month]
 
         src = f"{DROPBOX_VAULT_PATH}/{month_name} {year}.xlsx"
-        dst = f"{DROPBOX_VAULT_PATH}/Factures {month_name} {year}/Feuille d'heures.xlsx"
+        dst = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {year}/Feuille d'heures.xlsx"
 
         dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
         try:
-            dbx.dbx.files_create_folder_v2(f"{DROPBOX_VAULT_PATH}/Factures {month_name} {year}")
+            dbx.dbx.files_create_folder_v2(f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {year}")
         except Exception:
             pass
         try:
@@ -136,7 +136,7 @@ async def archive_previous_month_excel(bot):
 
         channel = bot.get_channel(DISCORD_CHANNEL_ID)
         if channel:
-            await channel.send(f"📦 Mois clôturé : `Factures {month_name} {year}/` contient maintenant `Feuille d'heures.xlsx` + les factures. Prêt à envoyer à l'employeur.")
+            await channel.send(f"📦 Mois clôturé : `Feuille d'heures {month_name} {year}/` contient maintenant `Feuille d'heures.xlsx` + les factures. Prêt à envoyer à l'employeur.")
         print(f"✓ Archived {month_name} {year}", flush=True)
     except Exception as e:
         print(f"✗ archive_previous_month_excel: {e}", flush=True)

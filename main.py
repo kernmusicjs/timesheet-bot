@@ -36,7 +36,7 @@ def invoice_filename(vendor: str, total: str, invoice_date) -> str:
 def _upload_invoice_pdf(content: bytes, original_filename: str, vendor: str, total: str, invoice_date) -> None:
     """Upload PDF to Dropbox in 'Factures {Month} {Year}/' folder next to the Excel."""
     month_name = FRENCH_MONTHS_CAP[invoice_date.month]
-    folder = f"{DROPBOX_VAULT_PATH}/Factures {month_name} {invoice_date.year}"
+    folder = f"{DROPBOX_VAULT_PATH}/Feuille d'heures {month_name} {invoice_date.year}"
     fname = invoice_filename(vendor, total, invoice_date)
     dbx = DropboxClient(DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN)
     dbx.create_folder(folder)
